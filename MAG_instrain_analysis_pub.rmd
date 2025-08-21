@@ -1,0 +1,667 @@
+---
+title: "Isolation by distance promotes strain diversification in the wild mouse gut microbiota"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#setup chunk
+```{r setup, include=FALSE}
+library(patchwork)
+library(geosphere)
+library(ape)
+library(vegan)
+library(ggplot2)
+library(ggpubr)
+library(ggrepel)
+library(ggtext)
+library(parallel)
+library(MKinfer)
+library(RColorBrewer)
+library(ecodist)
+library(phytools)
+library(tidyverse)
+library(cowplot)
+library(nlme)
+library(permuco)
+
+
+
+```
+
+#config + compare host duplicate samples analysis
+```{r}
+
+#InStrain Compare output -  genomewide_compare.tsv
+genomewide_compare = "IS_compare_b05_c0025/output/IS_compare_b05_c0025_genomeWide_compare.tsv"
+
+#InStrain Compare output - pairwise_SNP_locations.tsv  *BE CAREFULE WITH THIS FILE is BIG especially if unzipped
+pairwise_SNPs = "IS_compare_b05_c0025/output/IS_compare_b05_c0025_pairwise_SNP_locations.tsv.gz"
+
+#tsv Metadatafile should include headers - Sample name1 name2 Lat Lon site; Sample, name1, and name2 are all the same and should just be the 3 letter/number sample ID i.e. 1A4 this is a dumb way to do this, but it was easy when I originally set it up.
+meta_file = "MAGs_geo.txt"
+
+#tsv Metadatafile providing the site environment meta data 
+site_meta_file = "Small_sampling_fieldsite_samples.txt"
+
+
+#tsv gtdbtk bac120 MAG taxonomic classifications
+taxonomy_bac120 = "MAG_taxonomy_bac120.txt"
+
+#duplicate host samples
+dup_samples <- c("2I2", "2I4", "2D2", "2B1", "5D8", "5C9", "1E1", "1E3", "2A1", "2A5", "2A2", "5C3", "4G1", "1A8", "1B9", "1A6", "1B6", "5E6", "5E9", "4H7", "4H3", "2A7", "2A4")
+
+#samples to be removed 
+remove_samples = c("2I2","2D2","5D8","1E1","2A2","2A1","5C3","1A8","1A6","5E6","4H3","2A4")
+
+#maniculatus - c("2I4.sorted.bam","2B1.sorted.bam","5D8.sorted.bam","1E3.sorted.bam","2A1.sorted.bam","2A5.sorted.bam","5C3.sorted.bam")
+#leucopus - c("1A8.sorted.bam", "1B6.sorted.bam")
+#megalotis - c("5E9.sorted.bam","4H7.sorted.bam","2A7.sorted.bam")
+#gapperi - no duplicate individuals
+
+
+compare_host_dups <- data.frame()
+
+for (i in dup_samples) {
+  
+  x <- data.frame(Sample = i)
+  x$genome_count <- MAGs %>% filter(name1== i | name2 == i) %>% distinct(genome) %>% n_distinct()
+  x$comparisons <- MAGs %>% filter(name1== i | name2 == i) %>% nrow()
+  x$con_SNP_count <- MAGs %>% filter(name1== i | name2 == i) %>% pull(consensus_SNPs) %>% sum()
+  x$pop_SNP_count <- MAGs %>% filter(name1== i | name2 == i) %>% pull(population_SNPs) %>% sum()
+  x$compared_bases_count <- MAGs %>% filter(name1== i | name2 == i) %>% pull(compared_bases_count) %>% sum()
+  x$con_SNP_mean <- MAGs %>% filter(name1== i | name2 == i) %>% pull(consensus_SNPs) %>% mean()
+  x <- left_join(x, select(MAGs_geo, Sample, indiv))
+  
+ compare_host_dups <- rbind(compare_host_dups, x)
+  
+ }
+
+
+```
+
+
+#Create MAGs_joined df - create object that will be the basis for further analysis
+```{r}
+# read in and calc both con and pop ANI distance
+MAGs <- read_delim(genomewide_compare)
+MAGs <- MAGs %>% mutate(name1 = gsub(".sorted.bam","", name1), name2 = gsub(".sorted.bam","", name2), pairwise = paste0(name1,"vs",name2), genome = gsub(".fa.mod","", genome))
+MAGs <- MAGs %>% filter(!name1 %in% remove_samples & !name2 %in% remove_samples)
+MAGs <- MAGs %>% mutate(con_distance_ANI = 1 - conANI, pop_distance_ANI = 1 - popANI)
+MAGs <- MAGs %>% select(genome, pairwise, name1, name2, con_distance_ANI, pop_distance_ANI)
+
+
+# read in meta_data file and add to MAGs df - creating the mags_joined df that will be used going forward
+MAGs_geo <- read_delim(meta_file)
+
+mags_joined <- left_join(MAGs, MAGs_geo, by = "name1") %>% 
+  mutate(name2 = name2.x) %>% 
+  mutate(Lat1 = Lat) %>% 
+  mutate(Lon1 = Lon) %>% 
+  mutate(site1 = site) %>% 
+  select(-Sample, -name2.y, -name2.x, -Lat, -Lon, -site, -species2)
+
+mags_joined <- left_join(mags_joined, MAGs_geo, by = "name2") %>% 
+  mutate(name1 = name1.x) %>% 
+  mutate(Lat2 = Lat) %>% 
+  mutate(Lon2 = Lon) %>% 
+  mutate(site2 = site) %>% 
+  mutate(species1 = species1.x) %>% 
+  select(genome, name1, name2, pairwise, con_distance_ANI, pop_distance_ANI, Lat1, Lon1, Lat2, Lon2, site1, site2, species1, species2) 
+
+# Modify site tags and create the site_compare column. Makes it so that pairs of sites are alphabetical rather than dependent on sample id for order.
+mags_joined <- mags_joined %>%
+  rowwise() %>%
+  mutate(site1_ordered = min(site1, site2), site2_ordered = max(site1, site2), site_compare = paste0(site1_ordered, "vs", site2_ordered)) %>%
+  ungroup() %>%
+  select(-site1_ordered, -site2_ordered)
+
+# Calulate geographic distance between sites using haversine formula.
+mags_joined <- mags_joined %>%
+  rowwise() %>%
+  mutate(geo_distance = distHaversine(c(Lon1, Lat1), c(Lon2, Lat2))) %>% 
+  ungroup()
+
+# Modify species tags and create the species_compare column. Makes it so that pairs of species are alphabetical rather than dependent on sample id for order.
+mags_joined <- mags_joined %>%
+  rowwise() %>%
+  mutate(species1_ordered = min(species1, species2), species2_ordered = max(species1, species2), species_compare = paste0(species1_ordered, "vs", species2_ordered)) %>%
+  ungroup() %>%
+  select(-species1_ordered, -species2_ordered)
+
+# for each pair of samples use metadata to determine whether hosts are at the same site (sympatric vs. allopatric), and whether hosts are of the same species (conspecific vs. heterospecific). 
+mags_joined <- mags_joined %>% 
+  mutate(localization = if_else(site1 == site2, "sympatric", "allopatric"), sharing_type = if_else(species1 == species2, "conspecific", "heterospecific"))
+
+
+# add taxa information for each SGB and consolidate some of the phyla designations.
+MAGs_taxa <- read_delim(taxonomy_bac120)
+MAGs_taxa$phylum[MAGs_taxa$phylum == "Firmicutes_A" | MAGs_taxa$phylum == "Firmicutes_B"] <- "Firmicutes"
+MAGs_taxa$phylum[MAGs_taxa$phylum == "Desulfobacterota_I"] <- "Desulfobacterota"
+mags_joined <- left_join(mags_joined, MAGs_taxa, by = "genome")
+
+
+# add both whole host and mito con_ANI to mags_joined. Only conspecific comparisons will be populated.
+load("mito_host_ANI.Rda")
+mito_host_ANI <- mito_host_ANI %>% mutate(mito_host_conANI_dist = distance_ANI) %>% select(-distance_ANI)
+
+
+mags_joined <- left_join(mags_joined, mito_host_ANI, by = "pairwise")
+
+```
+
+
+#Symaptric sharing analysis - Faceted by host species
+```{r, echo=FALSE}
+sym_genomes <- mags_joined %>%
+  filter(localization == "sympatric") %>%
+  group_by(genome) %>%
+  filter(n_distinct(sharing_type) == 2) %>%
+  pull(genome) %>%
+  unique()
+
+sym_species_compare <- mags_joined %>%
+  filter(localization == "sympatric", sharing_type == "heterospecific") %>%
+  pull(species_compare) %>%
+  unique()
+
+focal_hosts <- c("leucopus", "maniculatus", "megalotis", "gapperi")
+
+sym_genomes_permt_facet <- data.frame()
+rm(perm_test)
+rm(df)
+
+
+for (focal in focal_hosts) {
+for (i in sym_genomes) {
+  
+  if (mags_joined %>% filter(genome == i) %>% nrow() > 3) {
+    
+    MAGS <- mags_joined %>% filter(genome == i)
+    
+      for (x in sym_species_compare) {
+          if (grepl(focal, x) == TRUE) {
+          rm(MAGS_step)
+          
+          perm_test <- NULL
+          df <- NULL
+          MAGS_step <-   MAGS %>% filter(species_compare == x | species_compare == paste0(focal,"vs",focal)) %>% filter(localization == "sympatric")
+          
+          try({perm_test <-perm.t.test(con_distance_ANI ~ sharing_type, data = MAGS_step, R = 1000000)}, silent = TRUE)
+          
+          if (!is.null(perm_test)) {
+            try({df <- data.frame(
+              genome = i,
+              comparison = x,
+              focal_host = focal, 
+              num_comparisons_heterospecific = MAGS_step %>% filter(species_compare == x) %>% nrow(),
+              num_comparisons_conspecific = MAGS_step %>% filter(species_compare == paste0(focal,"vs",focal)) %>% nrow(),
+              p_value = perm_test$perm.p.value,
+              is_significant = ifelse(perm_test$perm.p.value <= .05, TRUE, FALSE),
+              diff_means = perm_test$perm.estimate * -1,
+              standard_error = perm_test$perm.stderr,
+              permutations = perm_test$R,
+              true_permutations = perm_test$R.true,
+              row.names = NULL)}, silent = TRUE) }
+      
+         if (!is.null(df)) {
+          try(sym_genomes_permt_facet <- rbind(sym_genomes_permt_facet, df), silent = TRUE) }
+         
+        }}
+}}}
+
+    
+sym_genomes_permt_facet <- left_join(sym_genomes_permt_facet, MAGs_taxa, by = "genome")
+
+```
+
+
+
+#Standard MRM analysis without residuals based MRM - But this is where residuals are calculated on a per SGB basis
+```{r}
+#setup for loop
+regress_MAGs <- mags_joined %>% filter(sharing_type == "conspecific", species1 == "maniculatus", !is.na(mito_host_conANI_dist)) %>% mutate(geo_dist_km = geo_distance/1000) %>% select(genome, name1, name2, con_distance_ANI, mito_host_conANI_dist, geo_dist_km, phylum, class, order, family, genus, species)
+
+
+genome_loop <- regress_MAGs %>% pull(genome) %>% unique()
+dm_loop <- c("con_distance_ANI", "mito_host_conANI_dist", "geo_dist_km")
+regress_df <- data.frame()
+MRM_only <- data.frame()
+
+
+for (i in genome_loop) {
+
+  regress_genome <- regress_MAGs %>% filter(genome == i)
+  if(nrow(regress_genome) > 4){
+  for (metric in dm_loop) {
+    
+    temp_dist <- regress_genome %>% select(name1, name2, all_of(metric)) %>% pivot_wider(names_from = name2, values_from = all_of(metric))
+    temp_dist[[temp_dist$name1[1]]] <- NA
+    temp_dist <- temp_dist %>% relocate(temp_dist$name1[1], .before = 2)
+    temp_dist <- temp_dist %>% column_to_rownames(var = "name1") %>% as.matrix()
+    diag(temp_dist) <- 0
+    temp_dist <- t(temp_dist) %>% as.dist()
+    
+    assign(paste0(metric, "_distance"), temp_dist)
+    
+  }
+  
+  #MRM only analysis
+  MRM_temp_p <- MRM(con_distance_ANI_distance ~ geo_dist_km_distance + mito_host_conANI_dist_distance, nperm = 1000000, mrank = FALSE)
+  MRM_temp_s <- tryCatch({
+  MRM(con_distance_ANI_distance ~ geo_dist_km_distance + mito_host_conANI_dist_distance,
+      nperm = 1000000, mrank = TRUE)
+}, error = function(e) {
+  return(NULL)  # or "fail" or any placeholder
+})
+  
+  MRM_df_only <- data.frame(
+  SGB = i,
+  nrow = nrow(regress_genome),
+  geo_dist_km_p_coef = MRM_temp_p$coef[2,1], 
+  geo_dist_km_p_pval = MRM_temp_p$coef[2,2], 
+  host_conANI_p_coef = MRM_temp_p$coef[3,1], 
+  host_conANI_p_pval = MRM_temp_p$coef[3,2], 
+  R2_p = MRM_temp_p$r.squared[1], 
+  R2_p_pvalue = MRM_temp_p$r.squared[2],
+  
+  geo_dist_km_s_coef = if (!is.null(MRM_temp_s)) MRM_temp_s$coef[2,1] else NA, 
+  geo_dist_km_s_pval = if (!is.null(MRM_temp_s)) MRM_temp_s$coef[2,2] else NA, 
+  host_conANI_s_coef = if (!is.null(MRM_temp_s)) MRM_temp_s$coef[3,1] else NA, 
+  host_conANI_s_pval = if (!is.null(MRM_temp_s)) MRM_temp_s$coef[3,2] else NA, 
+  R2_s = if (!is.null(MRM_temp_s)) MRM_temp_s$r.squared[1] else NA, 
+  R2_s_pvalue = if (!is.null(MRM_temp_s)) MRM_temp_s$r.squared[2] else NA
+)
+  
+    MRM_only <- rbind(MRM_only, MRM_df_only)
+  
+  #generate both host ANI and geo distance residuals
+  regress_genome <- regress_genome %>% mutate(mito_residuals = residuals(gls(con_distance_ANI ~ mito_host_conANI_dist, data = regress_genome)), geodist_residuals = residuals(gls(con_distance_ANI ~ geo_dist_km, data = regress_genome)))
+  
+  regress_df <- rbind(regress_df, regress_genome)
+  
+  }
+}
+
+MRM_only$geo_dist_km_p_fdr <- p.adjust(MRM_only$geo_dist_km_p_pval, method = "BH")
+MRM_only$host_conANI_p_fdr <- p.adjust(MRM_only$host_conANI_p_pval, method = "BH")
+MRM_only$R2_p_fdr <- p.adjust(MRM_only$R2_p_pvalue, method = "BH")
+
+MRM_only$geo_dist_km_s_fdr <- p.adjust(MRM_only$geo_dist_km_s_pval, method = "BH")
+MRM_only$host_conANI_s_fdr <- p.adjust(MRM_only$host_conANI_s_pval, method = "BH")
+MRM_only$R2_s_fdr <- p.adjust(MRM_only$R2_s_pvalue, method = "BH")
+
+```
+
+
+#Residual MRM analysis - similar to above MRM analysis, but slightly different MRM df creation as a different MRM formula is used resulting in different terms. regress_df output from above is used here.
+```{r}
+#mito_residuals
+#geodist_residuals
+
+genome_loop <- regress_df %>% pull(genome) %>% unique()
+dm_loop <- c("mito_residuals", "geo_dist_km")
+MRM_df <- data.frame()
+regress_df <- data.frame()
+
+for (i in genome_loop) {
+
+  regress_genome <- regress_df %>% filter(genome == i)
+  for (metric in dm_loop) {
+    
+    temp_dist <- regress_genome %>% select(name1, name2, all_of(metric)) %>% pivot_wider(names_from = name2, values_from = all_of(metric))
+    temp_dist[[temp_dist$name1[1]]] <- NA
+    temp_dist <- temp_dist %>% relocate(temp_dist$name1[1], .before = 2)
+    temp_dist <- temp_dist %>% column_to_rownames(var = "name1") %>% as.matrix()
+    diag(temp_dist) <- 0
+    temp_dist <- t(temp_dist) %>% as.dist()
+    
+    assign(paste0(metric, "_distance"), temp_dist)
+    
+  }
+#This line specifically needs to be changed based on geo vs mito residual analysis. Dont think I need to do this again, so not going to make it into a dedicated function at this time.   
+  MRM_temp <- MRM(mito_residuals_distance ~ geo_dist_km_distance, nperm = 1000000)
+  MRM_df_temp <- data.frame(nrow = c(nrow(regress_genome)),SGB = c(i), correlation = c(MRM_temp$coef[2]), correlation_p = c(MRM_temp$coef[2,2]), r_squared = c(MRM_temp$r.squared[1]), r_squared_p = c(MRM_temp$r.squared[2]))
+  
+  MRM_df <- rbind(MRM_df, MRM_df_temp)
+  
+  
+}
+
+MRM_df$correlation_p_adjust <- p.adjust(MRM_df$correlation_p, method = "BH")
+
+MRM_df <- MRM_df %>% rename( geo_correlation_Regress = correlation,geo_correlation_Regress_p = correlation_p, geo_correlation_Regress_p_adjust = correlation_p_adjust, r_squared_geoR = r_squared) %>% select(SGB, geo_correlation_Regress,geo_correlation_Regress_p_adjust, geo_correlation_Regress_p, r_squared_geoR)
+
+
+#join the regression based MRM analysis with the general Meta MRM df
+maniculatusANI_MRM_df <- left_join(maniculatusANI_MRM_df, MRM_df , by = "SGB")
+
+maniculatusANI_MRM_df
+maniculatusANI_regress_df
+
+```
+
+
+#GFF parser - Uniprot
+```{r}
+
+annotations_path <- "/local1/workdir1/bd429/projects/eggnog/annotated_SGBs/"
+
+rm(cleaned_gff)
+gff_files <- list.files(annotations_path, pattern = ".gff")
+Uniprot_ids <- data.frame()
+
+
+for (i in gff_files) {
+  
+  cleaned_gff <- read_tsv(paste0(annotations_path,i))
+  cleaned_gff <- cleaned_gff %>% filter(grepl("UniProtKB:", cleaned_gff$`##gff-version 3`))
+  cleaned_gff <- cleaned_gff %>% mutate(UniprotKB = str_extract(cleaned_gff$`##gff-version 3`, "(?<=UniProtKB:)[^;]+"))
+  cleaned_gff <- cleaned_gff %>% mutate(SGB = str_remove(i, "\\.gff$"))
+  cleaned_gff <- cleaned_gff %>% select(SGB, UniprotKB)
+  
+  Uniprot_ids <- rbind(Uniprot_ids, cleaned_gff)
+
+  }
+
+
+
+Uniprot_ids
+
+```
+
+
+#quickgo parser using MRM
+```{r}
+#go_term_path - "/local1/workdir1/bd429/projects/eggnog/go_term_lists/Sporulation_quickGO.txt"
+
+quickGO_parse_MRM <- function(go_term_file, GO_term, Phylum_filter = NULL, nrow_filter = NULL) {
+
+#identify GO term file and read in.
+
+GO_df <- read_tsv(paste0("/local1/workdir1/bd429/projects/eggnog/go_term_lists/", go_term_file))
+
+
+#Parse GO term file and pull out the unique Uniprot IDs
+GO_IDs <- GO_df %>% 
+  filter(`GENE PRODUCT DB` == "UniProtKB") %>% 
+  mutate(Gene_product_ID = `GENE PRODUCT ID`) %>% 
+  select(Gene_product_ID) %>% distinct()
+
+
+#filter out SGBs that had rows equal to or fewer than nrow_filter when originally running MRM analysis. 
+if(!is.null(nrow_filter)) {
+MRM_only <- MRM_only %>% filter(nrow > nrow_filter)
+}
+
+#filter GO abundance by phylum (skip this to keep all taxa) + create meta df with MRM results
+if(!is.null(Phylum_filter)) {
+MRM_only <- MRM_only %>% filter(phylum == Phylum_filter)
+}
+
+
+#filter out SGBs in Uniprot_ids that are not in MRM
+Uniprot_ids <- Uniprot_ids %>% filter(SGB %in%  MRM_only$SGB)
+
+#Use the Uniprot IDs df generated earlier to identify GO genes in the SGB annotations and create a GO gene abundance df. Then add back those SGBs that had no GO genes when filtered out with - filter(is_GO_gene == TRUE).
+GO_abundance_df <-Uniprot_ids %>% 
+  mutate(is_GO_gene = UniprotKB %in% GO_IDs$Gene_product_ID) %>% 
+  filter(is_GO_gene == TRUE) %>% 
+  group_by(SGB,UniprotKB) %>% 
+  count() %>% 
+  pivot_wider(names_from = UniprotKB, values_from = n, values_fill = 0)
+
+GO_abundance_df <- left_join(distinct(Uniprot_ids, SGB), GO_abundance_df, by = "SGB") %>% replace(is.na(.),0)
+
+
+#columns to rownames for the abundance df
+GO_abundance_df <- column_to_rownames(GO_abundance_df, var = "SGB")
+
+
+
+
+c <- data.frame(go_term_file = go_term_file, GO_term = GO_term, Phylum_filter = ifelse(is.null(Phylum_filter), NA, Phylum_filter), nrow_filter = ifelse(is.null(nrow_filter), NA, nrow_filter), num_genes = ncol(GO_abundance_df))
+
+return(list(gene_abundance = GO_abundance_df, MRM_meta = MRM_only, config = c))
+
+}
+
+#quickGO_parse function(go_term_file, GO_term, Phylum_filter = NULL, nrow_filter = NULL)
+all_taxa_Sporulation_MRM <- quickGO_parse_MRM("sporulation_quickGO.txt", "Sporulation", Phylum_filter = NULL , nrow_filter = 6)
+
+MRM_only
+all_taxa_Sporulation_MRM
+all_taxa_motility_MRM
+
+go_list <- c("all_taxa_Sporulation_MRM", "all_taxa_motility_MRM")
+
+
+```
+
+
+#Go term PIC + lm
+```{r}
+plots_PIC <- list()
+plots_PIC_outliers <- list()
+
+for (i in go_list){
+
+#clears PIC_df
+PIC_df <- data.frame()
+
+#parse GO object calculating go abundance from the gene_abdundance matrix
+PIC_loop <- get(i)$gene_abundance %>% 
+    mutate(GO_sum = rowSums(.)) %>% 
+    rownames_to_column(var = "SGB") %>% 
+    select(SGB, GO_sum) %>% 
+    left_join(get(i)$MRM_meta, ., by = "SGB")
+
+PIC_loop <- PIC_loop %>% left_join(., checkm2_meta, by = "SGB") %>% filter(Completeness >= 90)
+
+#read in the tree and prune tips that don't show up in the PIC_loop df
+PIC_tree <- keep.tip.phylo(MRM_SGB_tree_midroot, PIC_loop$SGB)
+
+# Clean the tree and then order rows of PIC_loop to match. This is mostly for the caper PGLS workflow, but it is nice to keep things consistent. shouldn't really change anything here.
+PIC_tree$node.label <- NULL
+PIC_loop <- PIC_loop[match(PIC_tree$tip.label, PIC_loop$SGB), ]
+PIC_loop <- PIC_loop %>% select(-genus, -species)
+
+#transform data into PICs
+pic_go <- pic(PIC_loop$GO_sum, PIC_tree)
+pic_geo<- pic(PIC_loop$geo_dist_km_p_coef, PIC_tree)
+
+
+#add pic transformations to a df
+PIC_df <- data.frame(pic_go = pic_go, pic_geo = pic_geo)
+
+
+#set up interquartile range outlier analysis
+#calculate pic_go outliers and then add TRUE/FALSE column to PIC_df TRUE = outlier
+q1 <- quantile(PIC_df$pic_go, 0.25)
+q3 <- quantile(PIC_df$pic_go, 0.75)
+iqr <- q3 - q1
+lower_bound <- q1 - 1.5 * iqr
+upper_bound <- q3 + 1.5 * iqr
+PIC_df <- PIC_df %>% mutate(pic_go_outlier = if_else(pic_go >= lower_bound & pic_go <= upper_bound, FALSE, TRUE))
+
+#calculate pic_geo outliers and then add TRUE/FALSE column to PIC_df TRUE = outlier
+q1 <- quantile(PIC_df$pic_geo, 0.25)
+q3 <- quantile(PIC_df$pic_geo, 0.75)
+iqr <- q3 - q1
+lower_bound <- q1 - 1.5 * iqr
+upper_bound <- q3 + 1.5 * iqr
+PIC_df <- PIC_df %>% mutate(pic_geo_outlier = if_else(pic_geo >= lower_bound & pic_geo <= upper_bound, FALSE, TRUE))
+
+#with outliers
+#PIC linear model
+PIC_lm<- lm(pic_go~pic_geo-1, data = PIC_df)
+
+#make results df
+results <- summary(PIC_lm) %>% 
+  .$coefficients %>% 
+  as.data.frame() %>% 
+  rownames_to_column("term") %>% 
+  select(term, Estimate, std.error = `Std. Error`, t.value = `t value`, p.value = `Pr(>|t|)`)
+ 
+#plot PIC results
+plot <- ggplot(PIC_df, aes(x = pic_geo, y = pic_go)) +
+  geom_point(size = 1.5, alpha = .2) +
+  theme_minimal()+
+  geom_abline(intercept = 0, slope = coef(PIC_lm), color = "blue") +
+  xlab("PIC - geographic distance correlation") +
+  ylab("PIC - go term abundance") +
+  ggtitle(paste0(get(i)$config$GO_term," ", if_else(is.na(get(i)$config$Phylum_filter), "all taxa", get(i)$config$Phylum_filter)))
+
+#without outliers
+PIC_lm_outliers <- lm(pic_go~pic_geo-1, data = filter(PIC_df,pic_go_outlier == FALSE & pic_geo_outlier == FALSE))
+
+#make results df_outliers
+results_outliers <- summary(PIC_lm_outliers) %>% 
+  .$coefficients %>% 
+  as.data.frame() %>% 
+  rownames_to_column("term") %>% 
+  select(term, Estimate, std.error = `Std. Error`, t.value = `t value`, p.value = `Pr(>|t|)`) %>% 
+  mutate(outliers = "removed")
+
+#plot PIC results without outliers
+plot_outliers <- ggplot(filter(PIC_df,pic_go_outlier == FALSE & pic_geo_outlier == FALSE), aes(x = pic_geo, y = pic_go)) +
+  geom_point(size = 1.5, alpha = .2) +
+  theme_minimal()+
+  geom_abline(intercept = 0, slope = coef(PIC_lm_outliers), color = "blue") +
+  xlab("PIC - geographic distance correlation") +
+  ylab("PIC - go term abundance") +
+  ggtitle(paste0(get(i)$config$GO_term," ", if_else(is.na(get(i)$config$Phylum_filter), "all taxa", get(i)$config$Phylum_filter)," no outliers"))
+
+
+
+#outputs 1) df of PIC lm results 2) raw PIC lm object 3) df of transformed PICs 4) plot of PIC results 5) df of PIC lm results without outliers 6) raw PIC lm object without outliers 7) plot of PIC results without outliers 8) config df from original goparse file. 
+assign(paste0("PIC_",i), list(
+  PIC_results = results,
+  PIC_model = PIC_lm, 
+  PIC_df = PIC_df, 
+  PIC_plot = plot, 
+  PIC_results_outliers = results_outliers, 
+  PIC_model_outliers = PIC_lm_outliers, 
+  PIC_plot_outliers = plot_outliers, 
+  go_config = get(i)$config))
+
+#print name of all objects
+print(paste0("PIC_",i))
+
+#throw all the plots into a list for easy viewing
+plots_PIC <- append(plots_PIC,list(plot))
+plots_PIC_outliers <- append(plots_PIC_outliers,list(plot_outliers))
+}
+
+
+```
+
+
+#Traitar functional analysis
+```{r}
+MRM_only
+MRM_SGB_tree_midroot
+
+
+traitar_df <- read_delim("predictions_majority_vote_combined.txt")
+
+traitar_df <- traitar_df %>% mutate(across(-SGB, ~ case_when(
+  .x == 3 ~ 1,
+  .x == 0 ~ 0
+)))
+
+traitar_df_90comp <- left_join(select(MRM_only, SGB, geo_dist_km_p_coef), traitar_df, by = "SGB") %>% 
+  left_join(.,checkm2_meta, by = "SGB") %>% 
+  filter(Completeness >= 90) %>% 
+  select(-Completeness) %>% 
+  select(where(~ n_distinct(.) > 1))
+
+q1 <- quantile(traitar_df_90comp$geo_dist_km_p_coef, 0.25)
+q3 <- quantile(traitar_df_90comp$geo_dist_km_p_coef, 0.75)
+iqr <- q3 - q1
+lower_bound <- q1 - 1.5 * iqr
+upper_bound <- q3 + 1.5 * iqr
+traitar_df_90comp <- traitar_df_90comp %>% mutate(geo_corr_outlier = if_else(geo_dist_km_p_coef >= lower_bound & geo_dist_km_p_coef <= upper_bound, FALSE, TRUE)) %>% filter(geo_corr_outlier == FALSE)
+
+predictor_cols <- setdiff(names(traitar_df_90comp), c("SGB", "geo_dist_km_p_coef", "geo_corr_outlier"))
+
+# Run a GLS model for each trait extract the relevant bits and put them into a results df
+traitar_gls_pearson_MRM <- map_dfr(predictor_cols, function(trait) {
+  
+  formula <- as.formula(paste("geo_dist_km_p_coef ~", trait))
+  
+  model <- gls(formula, data = traitar_df_90comp) %>% summary()
+  
+  data.frame(
+    names = trait, 
+    coef = model$tTable[2,1], 
+    std_error =  model$tTable[2,2], 
+    t_value = model$tTable[2,3], 
+    p_value = model$tTable[2,4]
+    )
+})
+
+
+
+write_delim(traitar_gls_pearson_MRM, file = "traitar_gls_pearson_MRM.txt")
+```
+
+
+#Maniculatus host mitochondria figure setup
+```{r}
+man_hostmito_joined <- readRDS("/local1/workdir1/bd429/projects/host_read_analysis/figures/man_hostmito_joined.rds")
+
+
+man_hostmito_joined
+
+
+host_geodist_dist <- man_hostmito_joined %>% select(name1,name2,geo_dist_km)
+host_geodist_dist <- host_geodist_dist %>% pivot_wider(names_from = name2, values_from = geo_dist_km)
+host_geodist_dist[[host_geodist_dist$name1[1]]] <- NA
+host_geodist_dist <- host_geodist_dist %>% relocate(host_geodist_dist$name1[1], .before = 2)
+host_geodist_dist <- host_geodist_dist %>% column_to_rownames(var = "name1") %>% as.matrix()
+diag(host_geodist_dist) <- 0
+host_geodist_dist <- t(host_geodist_dist) %>% as.dist()
+
+
+
+host_conANI_dist <- man_hostmito_joined %>% select(name1,name2,con_distance_ANI)
+host_conANI_dist <- host_conANI_dist %>% pivot_wider(names_from = name2, values_from = con_distance_ANI)
+host_conANI_dist[[host_conANI_dist$name1[1]]] <- NA
+host_conANI_dist <- host_conANI_dist %>% relocate(host_conANI_dist$name1[1], .before = 2)
+host_conANI_dist <- host_conANI_dist %>% column_to_rownames(var = "name1") %>% as.matrix()
+diag(host_conANI_dist) <- 0
+host_conANI_dist <- t(host_conANI_dist) %>% as.dist()
+
+
+maniculatus_conANI_geodistkm_mantel <- vegan::mantel(host_conANI_dist, host_geodist_dist, method = "pearson", permutations = 10000)
+
+
+```
+
+
+#MRM coverage stats
+```{r}
+
+paths <-read_delim(file = "coverage_genome_list.txt", delim = " ", col_names = "path") %>% pull(path)
+coverage_stats <- data.frame()
+
+for (i in paths) {
+  cov <- read_delim(file = i) %>% select(genome, coverage, breadth) %>% mutate(sample = str_extract(i, "(?<=_)\\w+(?=/)"), SGB = str_remove(genome, "\\.fa\\.mod$")) %>% select(-genome)
+  
+  coverage_stats <- rbind(coverage_stats, cov)
+}
+
+coverage_stats <- coverage_stats %>% group_by(SGB) %>% summarise(mean_coverage = mean(coverage), mean_breadth = mean(breadth))
+coverage_stats <- MRM_only %>% select(SGB, geo_dist_km_p_fdr) %>% left_join(coverage_stats, ., by = "SGB")%>% filter(!is.na(geo_dist_km_p_fdr)) %>% mutate(significance = if_else(geo_dist_km_p_fdr > .05, "not_significant", "significant"))
+
+write_delim(coverage_stats, file = "coverage_stats.txt")
+
+perm.t.test(mean_coverage ~ significance, data = coverage_stats)
+```
+
+
+
+
