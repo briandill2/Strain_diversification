@@ -9,21 +9,13 @@ knitr::opts_chunk$set(echo = TRUE)
 
 #setup chunk
 ```{r setup, include=FALSE}
-library(patchwork)
 library(geosphere)
 library(ape)
 library(vegan)
-library(ggplot2)
-library(ggpubr)
-library(ggrepel)
-library(ggtext)
-library(parallel)
 library(MKinfer)
-library(RColorBrewer)
 library(ecodist)
 library(phytools)
 library(tidyverse)
-library(cowplot)
 library(nlme)
 library(permuco)
 
