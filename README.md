@@ -9,7 +9,7 @@ To run the analysis:
 
 Expected outputs are described in the R script. The expected runtime for the demo on a standard desktop computer is < 4 hours. 
 
-The following R libraries are required: 
+The following R libraries are required:
 geosphere
 ape
 vegan
