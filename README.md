@@ -7,7 +7,7 @@ To run the analysis:
 2) Open `MAG_instrain_analysis.Rmd` in RStudio (or another interactive IDE).
 3) Run all code chunks in order. 
 
-Expected outputs are described in the R script. The expected runtime for the demo on a standard desktop computer is < 4 hours. 
+Expected outputs are described in the R script. The expected runtime for all analyses on a standard desktop computer is < 4 hours. 
 
 The following R libraries are required:  
 geosphere  
