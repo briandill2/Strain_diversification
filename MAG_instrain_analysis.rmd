@@ -3,7 +3,7 @@ title: "Isolation by distance promotes strain diversification in the wild mouse 
 output: github_document
 ---
 
-#Data frames of interest after running all code chunks
+#Objects of interest after running all code chunks
 
 #Host mitochondria IBD (Figure 1)
 maniculatus_conANI_geodistkm_mantel
@@ -153,7 +153,7 @@ host_joined <- host_joined %>% mutate(geo_dist_km = geo_distance/1000)
 
 ```
 
-#Create MAGs_joined df - create df will be the basis for further analysis and contains genetic and geographic distances plus metadata.
+#Create MAGs_joined df - created df will be the basis for further analysis and contains genetic and geographic distances plus metadata.
 ```{r}
 # read in and calculate both con and pop ANI distance
 MAGs <- read_delim(genomewide_compare)
@@ -662,6 +662,7 @@ mean_ani_sharing_long <- mean_ani_sharing %>%
   )
 
 ```
+
 
 
 
