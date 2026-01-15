@@ -3,7 +3,7 @@ This R markdown file written in the R programming language can be used to reprod
 The code has been tested in R v4.5.0. The install time of required libraries is typically less than 1 hour on a standard desktop computer. 
 
 To run the analysis:
-1) unzip `strain_diversification_inputs.tar.gz` in the working directory with `tar -xzvf strain_diversification_input.tar.gz`.
+1) unzip `strain_diversification_inputs.tar.gz` in the working directory with `tar -xzvf strain_diversification_inputs.tar.gz`.
 2) Open `MAG_instrain_analysis.Rmd` in RStudio (or another interactive IDE).
 3) Run all code chunks in order. 
 
