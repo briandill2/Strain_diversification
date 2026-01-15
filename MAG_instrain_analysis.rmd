@@ -1,7 +1,11 @@
 ---
-title: "Isolation by distance promotes strain diversification in the wild mouse gut microbiota"
+title: "Isolation by distance drives incipient strain divergence in the wild mouse gut microbiota"
 output: github_document
 ---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
 
 #Objects of interest after running all code chunks
 
@@ -22,6 +26,26 @@ traitar_gls_pearson_MRM
 #sympatric sharing analysis (Figure 4)
 mean_ani_sharing_long
 
+#host genetic distances
+host_joined
+
+#maniculatus gut microbiota genetic distances
+mags_joined
+aggregate_ANI_IBH_lm
+aggregate_ANI_IBD_lm
+
+#Synteny analysis (Supp Figure 5)
+regress_df_synteny
+aggregate_synteny_IBH_lm
+aggregate_synteny_IBD_lm
+
+#Coptr analysis (Supp figure 3)
+coptr_df
+coptr_significance_t_test
+
+#Mitocaller analysis
+mitocaller_out
+mitocaller_CCC
 
 #setup chunk
 ```{r setup, include=FALSE}
@@ -35,6 +59,7 @@ library(phytools)
 library(tidyverse)
 library(nlme)
 library(permuco)
+library(DescTools)
 
 
 ```
@@ -46,7 +71,9 @@ library(permuco)
 genomewide_compare = "strain_diversification_inputs/microbiota_genomeWide_compare.tsv"
 
 #maniculatus host mitochondria InStrain compare output
-host_genomewide_compare <- "strain_diversification_inputs/host_mitochondria_genomeWide_compare.tsv"
+host_genomewide_compare <- c("strain_diversification_inputs/maniculatus_host_mitochondria_genomeWide_compare.tsv",
+                             "strain_diversification_inputs/megalotis_host_mitochondria_genomeWide_compare.tsv",
+                             "strain_diversification_inputs/leucopus_host_mitochondria_genomeWide_compare.tsv")
 
 #tsv Metadatafile should include headers - Sample name1 name2 Lat Lon site; Sample, name1, and name2 are all the same and should just be the 3 letter/number sample ID 
 meta_file = "strain_diversification_inputs/meta_data.txt"
@@ -66,7 +93,7 @@ GO_path <- "strain_diversification_inputs/go_term_lists/"
 #midroot SGB tree
 MRM_SGB_tree_file <- "strain_diversification_inputs/midroot_SGB_tree.txt"
 
-#MAG QC file contraining checkm2 results
+#MAG QC file containing checkm2 results
 checkm2_file <- "strain_diversification_inputs/checkm2.tsv"
 
 #uniprot ID file
@@ -80,6 +107,15 @@ traitar_input <- "strain_diversification_inputs/traiter_output.txt"
 
 #instrain coverage stats pulled from InStrain profile outputs
 MAG_coverage_stats <- "strain_diversification_inputs/coverage_stats.txt"
+
+#coptr input
+coptr_input <-  "coptr_out.csv"
+
+#synteny input
+synteny_input <- "avg_synteny_scores_all_regions.csv"
+
+#mitocaller directory
+mitocaller_input_dir <- "mitocaller"
 
 #function to compare samples taken from the same host
 compare_host_dups <- function() {
@@ -110,14 +146,13 @@ for (i in dup_samples) {
 #Create host_joined df - created df will be the basis for further analysis and contains host genetic and geographic distances plus metadata.
 ```{r}
 # read in and calculate both con and pop ANI distance
-host_ani <- read_delim(host_genomewide_compare)
+host_ani <- map_dfr(host_genomewide_compare, read_tsv)
 host_ani <- host_ani %>% mutate(mito_host_conANI_dist = 1 - conANI)
 host_ani <- host_ani %>% mutate(name1 = gsub(".sorted.bam","", name1), name2 = gsub(".sorted.bam","", name2), pairwise = paste0(name1,"vs",name2), genome = gsub(".fa.mod","", genome))
 
 # read in meta_data file
 sample_meta <- read_delim(meta_file)
-sample_meta
-host_ani %>% select(pairwise, name1, name2, mito_host_conANI_dist) %>% left_join(., sample_meta, by = "name1")
+
 
 #Add metadata for both sample1 and sample2
 host_joined <- host_ani %>% select(pairwise, name1, name2, mito_host_conANI_dist) %>% left_join(., sample_meta, by = "name1") %>% 
@@ -153,7 +188,8 @@ host_joined <- host_joined %>% mutate(geo_dist_km = geo_distance/1000)
 
 ```
 
-#Create MAGs_joined df - created df will be the basis for further analysis and contains genetic and geographic distances plus metadata.
+
+#Create MAGs_joined df - create df will be the basis for further analysis and contains genetic and geographic distances plus metadata.
 ```{r}
 # read in and calculate both con and pop ANI distance
 MAGs <- read_delim(genomewide_compare)
@@ -226,7 +262,7 @@ mags_joined <- left_join(mags_joined, select(host_joined, mito_host_conANI_dist,
 #Maniculatus host mitochondria IBD
 ```{r}
 #filter out host duplicates - could do this earlier, but without host dups output quality can't be determined. could do this in the MAGs_joined chunk, but want to keep that focused on MAG df creation.
-host_joined_filtered <- host_joined %>% filter(!name1 %in% remove_samples & !name2 %in% remove_samples)
+host_joined_filtered <- host_joined %>% filter(species == "maniculatus") %>% filter(!name1 %in% remove_samples & !name2 %in% remove_samples) 
 
 #create distance matrices 
 host_geodist_dist <- host_joined_filtered %>% select(name1,name2,geo_dist_km)
@@ -249,6 +285,7 @@ host_conANI_dist <- t(host_conANI_dist) %>% as.dist()
 
 #mantel test to look at association between host conANI and geographic distance
 maniculatus_conANI_geodistkm_mantel <- vegan::mantel(host_conANI_dist, host_geodist_dist, method = "pearson", permutations = 10000)
+
 ```
 
 #Per SGB MRM analysis and GLS for extracting residuals - extracted residuals are used in next code chunk
@@ -328,13 +365,19 @@ MRM_only$R2_s_fdr <- p.adjust(MRM_only$R2_s_pvalue, method = "BH")
 
 
 #Test whether genome coverage correlates with a significant MRM result
-coverage_stats <- read_delim(file = MAG_coverage_stats)
+coverage_stats_raw <- read_delim(file = MAG_coverage_stats) %>% filter(
+    sample %in% (filter(mags_joined, sharing_type == "conspecific", species1 == "maniculatus")$name1) | 
+    sample %in% (filter(mags_joined, sharing_type == "conspecific", species1 == "maniculatus")$name2)
+    )
 
-coverage_stats <- coverage_stats %>% group_by(genome) %>% summarise(mean_coverage = mean(coverage), mean_breadth = mean(breadth))
+coverage_stats <- coverage_stats_raw %>% group_by(genome) %>% summarise(mean_coverage = mean(coverage), mean_breadth = mean(breadth))
 
 coverage_stats <- MRM_only %>% select(genome, geo_dist_km_p_fdr) %>% left_join(coverage_stats, ., by = "genome")%>% filter(!is.na(geo_dist_km_p_fdr)) %>% mutate(significance = if_else(geo_dist_km_p_fdr > .05, "not_significant", "significant"))
 
 MRM_coverage_t_test <- perm.t.test(mean_coverage ~ significance, data = coverage_stats)
+
+aggregate_ANI_IBH_lm <-lm(geodist_residuals ~ mito_host_conANI_dist, data = regress_df) %>% summary()
+aggregate_ANI_IBD_lm <- lm(mito_residuals ~ geo_dist_km, data = regress_df) %>% summary()
 
 ```
 
@@ -402,8 +445,7 @@ residuals_MRM <- left_join(MRM_df_geo, MRM_df_host, by = c("genome", "nrow"))
 
 
 #GFF parser - Uniprot
-```{r, warning=FALSE, message=FALSE}
-
+```{r}
 #stand in to be run without annotated SGBs. If you have downloaded the annotated SGBs from dryad to your working directory, uncomment code here and in the config section, and then run. 
 Uniprot_ids <- read.delim(uniprot_input, sep = " ")
 
@@ -424,8 +466,6 @@ Uniprot_ids <- read.delim(uniprot_input, sep = " ")
 #  Uniprot_ids <- rbind(Uniprot_ids, cleaned_gff)
 
 #}
-
-
 
 ```
 
@@ -549,7 +589,6 @@ return(PIC_perm_lm)
 permlm_PIC_all_taxa_Sporulation_MRM <- quickGO_parse_MRM(all_taxa_Sporulation_MRM)
 permlm_PIC_all_taxa_motility_MRM <- quickGO_parse_MRM(all_taxa_motility_MRM)
 
-
 ```
 
 #Traitar functional analysis
@@ -597,7 +636,6 @@ traitar_gls_pearson_MRM <- map_dfr(predictor_cols, function(trait) {
 })
 
 
-traitar_gls_pearson_MRM
 ```
 
 
@@ -661,11 +699,184 @@ mean_ani_sharing_long <- mean_ani_sharing %>%
     names_pattern = "(meanANI|n_SGB|p_value|p_adjust|permutations)_(.*)"
   )
 
+
+#aggregate paired t-tests - these are named awkwardly, but refer to the host species that are compared to maniculatus ex. leu = maniculatus_leucopus comparisons
+
+man_leu_paired_perm_t_test <- perm.t.test(x = mean_ani_sharing$meanANI_man_man, y = mean_ani_sharing$meanANI_man_leu, paired = TRUE)
+
+man_meg_paired_perm_t_test <- perm.t.test(x = mean_ani_sharing$meanANI_man_man, y = mean_ani_sharing$meanANI_man_meg, paired = TRUE)
+
+leu_meg_paired_perm_t_test <- perm.t.test(x = mean_ani_sharing$meanANI_man_leu, y = mean_ani_sharing$meanANI_man_meg, paired = TRUE)
+perm.t.t
+
 ```
 
 
+#Synteny analysis - aggregate APSS residual plots
+```{r}
+
+synteny_df <- read_csv(synteny_input)
+
+
+synteny_df <- synteny_df %>% 
+  mutate(Sample1 = gsub("\\.contigs", "", Sample1), Sample2 = gsub("\\.contigs", "", Sample2), genome = Ref_genome) %>% 
+  mutate(pairwise = paste0(Sample1,"vs",Sample2)) %>% 
+  select(genome, pairwise, Sample1, Sample2, APSS, Compared_regions) %>% 
+  left_join(., mags_joined, by = c("genome", "pairwise"))
+
+
+synteny_df_filter <- synteny_df %>% 
+  filter(!is.na(con_distance_ANI)) %>% 
+  filter(Compared_regions > 50) %>% 
+  filter(sharing_type == "conspecific", species1 == "maniculatus", !is.na(mito_host_conANI_dist)) %>% 
+  select(genome, name1, name2, APSS, mito_host_conANI_dist, geo_dist_km, phylum, class, order, family, genus, species)
 
 
 
+genome_loop <- synteny_df_filter %>% pull(genome) %>% unique()
+dm_loop <- c("APSS", "mito_host_conANI_dist", "geo_dist_km")
+regress_df_synteny <- data.frame()
+MRM_synteny <- data.frame()
+
+# this loop does the main MRM analysis and extracts residuals from an additional GLS. 
+for (i in genome_loop) {
+
+  regress_genome <- synteny_df_filter %>% filter(genome == i)
+  if(nrow(regress_genome) > 4){
+ 
+  #generate both host ANI and geo distance residuals
+  regress_genome <- regress_genome %>% mutate(mito_residuals = residuals(gls(APSS ~ mito_host_conANI_dist, data = regress_genome)), geodist_residuals = residuals(gls(APSS ~ geo_dist_km, data = regress_genome)))
+  
+  regress_df_synteny <- rbind(regress_df_synteny, regress_genome)
+  
+  }
+}
+
+aggregate_synteny_IBH_lm <- lm(1 - geodist_residuals ~ mito_host_conANI_dist, data = regress_df_synteny) %>% summary()
+aggregate_synteny_IBD_lm <- lm(1 - mito_residuals ~ geo_dist_km, data = regress_df_synteny) %>% summary()
+
+```
 
 
+#coptr
+```{r}
+coptr_df_raw <- read_csv(file = coptr_input)
+
+
+coptr_df <- coptr_df_raw %>% 
+  rename(genome = `log2(PTR):genome_id/sample_id`) %>% 
+  pivot_longer(!genome, names_to = "sample", values_to = "ptr") %>% 
+  filter(!is.na(ptr)) %>% 
+  filter(
+    sample %in% (filter(mags_joined, sharing_type == "conspecific", species1 == "maniculatus")$name1) | 
+    sample %in% (filter(mags_joined, sharing_type == "conspecific", species1 == "maniculatus")$name2)
+    ) %>% 
+  group_by(genome) %>% 
+  summarise(mean_ptr = mean(ptr))
+
+
+coptr_df <- coptr_df %>% left_join(., select(coverage_stats, genome, geo_dist_km_p_fdr, significance), by = "genome")
+
+
+coptr_df <- MAGs %>%
+  filter(pairwise %in% filter(mags_joined, sharing_type == "conspecific", species1 == "maniculatus")$pairwise) %>% 
+  mutate(snp_per_base = consensus_SNPs/compared_bases_count) %>% 
+  group_by(genome) %>% 
+  summarise(mean_snp_per_base = mean(snp_per_base)) %>% 
+  left_join(coptr_df, ., by = "genome")
+
+
+coptr_df <- synteny_df %>% group_by(genome) %>% 
+  summarise(mean_apss = mean(APSS)) %>%
+  left_join(coptr_df, ., by = "genome")
+
+coptr_df <- mags_joined %>% 
+  filter(sharing_type == "conspecific", species1 == "maniculatus") %>% 
+  group_by(genome) %>% 
+  summarise(mean_geo_dist_km = mean(geo_dist_km), mean_host_ani = mean(mito_host_conANI_dist)) %>% 
+  left_join(coptr_df, ., by = "genome")
+
+
+coptr_significance_t_test <- perm.t.test(mean_ptr ~ significance, data = coptr_df)
+
+
+```
+
+#mitoanalyzer
+```{r}
+
+mito_files <- list.files(mitocaller_input_dir, full.names = TRUE)
+
+mito_all <- map_dfr(mito_files, function(f) {
+  
+  mito_calc <- read_delim(f) %>% 
+  mutate(sample = gsub("_mitocaller.out", "", basename(f)), chrom = `#Chrom`, position = Pos) %>% 
+  select(sample, chrom, position, FilteredDepth, FilteredNumA, FilteredNumC, FilteredNumG, FilteredNumT, FilteredNumN) %>% 
+  mutate(FilteredDepth = gsub("DepthFilter:", "", FilteredDepth),
+         FilteredNumA = gsub("A:", "", FilteredNumA), 
+         FilteredNumC = gsub("C:", "", FilteredNumC), 
+         FilteredNumG = gsub("G:", "", FilteredNumG), 
+         FilteredNumT = gsub("T:", "", FilteredNumT),
+         FilteredNumN = gsub("N:", "", FilteredNumN)) %>% 
+  mutate(across(c(FilteredDepth, FilteredNumA, FilteredNumC, FilteredNumG, FilteredNumT, FilteredNumN), as.numeric)) %>%
+  mutate(FilteredDepth = FilteredDepth - FilteredNumN) %>% 
+  filter(FilteredDepth >= 5) %>% 
+  select(-FilteredNumN)
+  
+  
+  if (nrow(mito_calc) == 0) return(NULL)
+  
+  
+  mito_calc %>% 
+  rowwise() %>%
+  mutate(
+    max_count = max(c_across(starts_with("FilteredNum")), na.rm = TRUE),
+    alleles = list(c("A", "C", "G", "T")[which(c_across(starts_with("FilteredNum")) == max_count)]),
+    major_allele = ifelse(length(alleles) == 1, alleles, NA)
+  ) %>%
+  ungroup() %>% 
+  filter(!is.na(major_allele)) %>% 
+  select(sample, chrom, position, major_allele)
+  
+})
+  
+
+mito_wide <- mito_all %>% pivot_wider(names_from = sample, values_from = major_allele)
+
+
+#matrix math
+allele_mat <- as.matrix(select(mito_wide, -chrom, -position))
+
+valid_mat <- !is.na(allele_mat)
+
+n <- ncol(allele_mat)
+samples <- colnames(allele_mat)
+
+# Shared positions per pair
+shared <- t(valid_mat) %*% valid_mat
+
+# Identical bases per pair
+identical <- matrix(0, n, n, dimnames = list(samples, samples))
+for (base in c("A","C","G","T")) {
+  mask <- allele_mat == base
+  mask[is.na(mask)] <- FALSE
+  identical <- identical + t(mask) %*% mask
+}
+
+# Pairwise ANI
+ani_matrix <- identical / shared
+diag(ani_matrix) <- 1
+
+
+mitocaller_out <- ani_matrix %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "sample1") %>% 
+  pivot_longer(-sample1, names_to = "sample2", values_to = "ANI") %>% 
+  filter(sample1 < sample2) %>% 
+  mutate(pairwise = paste0(sample1,"vs",sample2)) %>% 
+  left_join(host_joined, ., by = "pairwise") %>% 
+  mutate(instrainANI = 1 - mito_host_conANI_dist) %>% select(pairwise, ANI, instrainANI)
+
+mitocaller_CCC <- CCC(mitocaller_out$ANI, mitocaller_out$instrainANI)
+
+```
