@@ -50,6 +50,7 @@ mitocaller_CCC
 #setup chunk
 ```{r setup, include=FALSE}
 
+library(DescTools) #Has conflict with ecodist package. This should be loaded first so that ecodist can overwrite dependencies. Concordance analysis still works with ecodist dependencies being prioritized.
 library(geosphere)
 library(ape)
 library(vegan)
@@ -59,7 +60,6 @@ library(phytools)
 library(tidyverse)
 library(nlme)
 library(permuco)
-library(DescTools)
 
 
 ```
@@ -875,8 +875,11 @@ mitocaller_out <- ani_matrix %>%
   filter(sample1 < sample2) %>% 
   mutate(pairwise = paste0(sample1,"vs",sample2)) %>% 
   left_join(host_joined, ., by = "pairwise") %>% 
-  mutate(instrainANI = 1 - mito_host_conANI_dist) %>% select(pairwise, ANI, instrainANI)
+  mutate(instrainANI = 1 - mito_host_conANI_dist) %>% 
+  select(pairwise, ANI, instrainANI) %>%
+  filter(!is.na(ANI))
 
 mitocaller_CCC <- CCC(mitocaller_out$ANI, mitocaller_out$instrainANI)
 
 ```
+
